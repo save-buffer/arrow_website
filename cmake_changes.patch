@@ -1,0 +1,148 @@
+From d87809e63c8fb57d152019c27bf10fba54539ddf Mon Sep 17 00:00:00 2001
+From: Sasha Krassovsky <krassovskysasha@gmail.com>
+Date: Fri, 20 May 2022 13:01:46 -0700
+Subject: [PATCH] Make it work on wasm
+
+---
+ cpp/cmake_modules/SetupCxxFlags.cmake       |  6 ++++--
+ cpp/cmake_modules/ThirdpartyToolchain.cmake | 19 ++++++++++++++++++-
+ cpp/src/arrow/CMakeLists.txt                |  6 ++++--
+ cpp/src/arrow/util/cpu_info.cc              | 18 +++++++++++++++++-
+ 4 files changed, 43 insertions(+), 6 deletions(-)
+
+diff --git a/cpp/cmake_modules/SetupCxxFlags.cmake b/cpp/cmake_modules/SetupCxxFlags.cmake
+index bc503145d..492b42717 100644
+--- a/cpp/cmake_modules/SetupCxxFlags.cmake
++++ b/cpp/cmake_modules/SetupCxxFlags.cmake
+@@ -28,7 +28,7 @@ if(NOT DEFINED ARROW_CPU_FLAG)
+     set(ARROW_CPU_FLAG "x86")
+   elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|ARM64|arm64")
+     set(ARROW_CPU_FLAG "armv8")
+-  elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "armv7")
++  elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "armv7|arm")
+     set(ARROW_CPU_FLAG "armv7")
+   elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "powerpc|ppc")
+     set(ARROW_CPU_FLAG "ppc")
+@@ -304,7 +304,9 @@ if("${BUILD_WARNING_LEVEL}" STREQUAL "CHECKIN")
+     set(CXX_COMMON_FLAGS "${CXX_COMMON_FLAGS} -Wall")
+     set(CXX_COMMON_FLAGS "${CXX_COMMON_FLAGS} -Wextra")
+     set(CXX_COMMON_FLAGS "${CXX_COMMON_FLAGS} -Wdocumentation")
+-    set(CXX_COMMON_FLAGS "${CXX_COMMON_FLAGS} -Wshorten-64-to-32")
++    if(NOT CMAKE_SYSTEM_NAME STREQUAL "Emscripten")
++      set(CXX_COMMON_FLAGS "${CXX_COMMON_FLAGS} -Wshorten-64-to-32")
++    endif()
+     set(CXX_COMMON_FLAGS "${CXX_COMMON_FLAGS} -Wno-missing-braces")
+     set(CXX_COMMON_FLAGS "${CXX_COMMON_FLAGS} -Wno-unused-parameter")
+     set(CXX_COMMON_FLAGS "${CXX_COMMON_FLAGS} -Wno-constant-logical-operand")
+diff --git a/cpp/cmake_modules/ThirdpartyToolchain.cmake b/cpp/cmake_modules/ThirdpartyToolchain.cmake
+index 7c3e3a533..2b937093f 100644
+--- a/cpp/cmake_modules/ThirdpartyToolchain.cmake
++++ b/cpp/cmake_modules/ThirdpartyToolchain.cmake
+@@ -787,6 +787,15 @@ if(CMAKE_C_COMPILER_LAUNCHER AND CMAKE_CXX_COMPILER_LAUNCHER)
+        -DCMAKE_CXX_COMPILER_LAUNCHER=${CMAKE_CXX_COMPILER_LAUNCHER})
+ endif()
+ 
++if(CMAKE_SYSTEM_NAME STREQUAL "Emscripten")
++  list(APPEND
++    EP_COMMON_CMAKE_ARGS
++    -DEMSCRIPTEN_SYSTEM_PROCESSOR=${EMSCRIPTEN_SYSTEM_PROCESSOR}
++    -DEMSCRIPTEN_ROOT_PATH=${EMSCRIPTEN_ROOT_PATH}
++    -DCMAKE_TOOLCHAIN_FILE=${CMAKE_TOOLCHAIN_FILE}
++  )
++endif()
++
+ if(NOT ARROW_VERBOSE_THIRDPARTY_BUILD)
+   set(EP_LOG_OPTIONS
+       LOG_CONFIGURE
+@@ -1812,6 +1821,12 @@ macro(build_jemalloc)
+     # 4k and 64k page arm64 systems.
+     list(APPEND JEMALLOC_CONFIGURE_COMMAND "--with-lg-page=${ARROW_JEMALLOC_LG_PAGE}")
+   endif()
++  if(${CMAKE_SYSTEM_NAME} STREQUAL "Emscripten")
++    list(APPEND
++      JEMALLOC_CONFIGURE_COMMAND
++      "--host=${CMAKE_SYSTEM_PROCESSOR}"
++      "--with-lg-quantum=4")
++  endif()
+   list(APPEND
+        JEMALLOC_CONFIGURE_COMMAND
+        "--prefix=${JEMALLOC_PREFIX}"
+@@ -1825,6 +1840,7 @@ macro(build_jemalloc)
+        "--disable-libdl"
+        # See https://github.com/jemalloc/jemalloc/issues/1237
+        "--disable-initial-exec-tls"
++       "--host=${CMAKE_SYSTEM_PROCESSOR}"
+        ${EP_LOG_OPTIONS})
+   if(${UPPERCASE_BUILD_TYPE} STREQUAL "DEBUG")
+     # Enable jemalloc debug checks when Arrow itself has debugging enabled
+@@ -2567,12 +2583,13 @@ macro(build_utf8proc)
+   endif()
+ 
+   set(UTF8PROC_CMAKE_ARGS
+-      ${EP_COMMON_TOOLCHAIN}
++      ${EP_COMMON_CMAKE_ARGS}
+       "-DCMAKE_INSTALL_PREFIX=${UTF8PROC_PREFIX}"
+       -DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE}
+       -DCMAKE_INSTALL_LIBDIR=lib
+       -DBUILD_SHARED_LIBS=OFF)
+ 
++
+   externalproject_add(utf8proc_ep
+                       ${EP_LOG_OPTIONS}
+                       CMAKE_ARGS ${UTF8PROC_CMAKE_ARGS}
+diff --git a/cpp/src/arrow/CMakeLists.txt b/cpp/src/arrow/CMakeLists.txt
+index 2cae7a731..2dc4a8557 100644
+--- a/cpp/src/arrow/CMakeLists.txt
++++ b/cpp/src/arrow/CMakeLists.txt
+@@ -243,8 +243,10 @@ if(ARROW_JEMALLOC)
+   list(APPEND ARROW_SRCS memory_pool_jemalloc.cc)
+ endif()
+ 
+-append_avx2_src(util/bpacking_avx2.cc)
+-append_avx512_src(util/bpacking_avx512.cc)
++if(NOT CMAKE_SYSTEM_NAME STREQUAL "Emscripten")
++  append_avx2_src(util/bpacking_avx2.cc)
++  append_avx512_src(util/bpacking_avx512.cc)
++endif()
+ 
+ if(ARROW_HAVE_NEON)
+   list(APPEND ARROW_SRCS util/bpacking_neon.cc)
+diff --git a/cpp/src/arrow/util/cpu_info.cc b/cpp/src/arrow/util/cpu_info.cc
+index fbe55aec0..b49924fa0 100644
+--- a/cpp/src/arrow/util/cpu_info.cc
++++ b/cpp/src/arrow/util/cpu_info.cc
+@@ -292,6 +292,22 @@ void OsRetrieveCpuInfo(int64_t* hardware_flags, CpuInfo::Vendor* vendor,
+   // TODO: vendor, model_name
+ }
+ 
++#elif defined(__EMSCRIPTEN__)
++    void OsRetrieveCacheSize(std::array<int64_t, kCacheLevels> *cache_sizes)
++    {
++        (*cache_sizes)[0] = 32 * 1024;
++        (*cache_sizes)[1] = 1024 * 1024;
++        (*cache_sizes)[2] = 2 * 1024 * 1024;
++    }
++
++    void OsRetrieveCpuInfo(int64_t *hardware_flags, CpuInfo::Vendor *vendor,
++                           std::string *model_name)
++    {
++        *vendor = CpuInfo::Vendor::Unknown;
++        *hardware_flags = 0;
++        *model_name = "Emscripten VCpu";
++    }
++
+ #else
+ //------------------------------ LINUX ------------------------------//
+ // Get cache size, return 0 on error
+@@ -413,7 +429,7 @@ void OsRetrieveCpuInfo(int64_t* hardware_flags, CpuInfo::Vendor* vendor,
+     }
+   }
+ }
+-#endif  // WINDOWS, MACOS, LINUX
++#endif  // WINDOWS, MACOS, Emscripten, LINUX
+ 
+ //============================== Arch Dependent ==============================//
+ 
+-- 
+2.37.2
+
